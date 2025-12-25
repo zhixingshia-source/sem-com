@@ -1,0 +1,12 @@
+torch>=2.1.0
+torchvision>=0.16.0
+timm>=0.9.10
+einops
+transformers>=4.40.0
+diffusers
+soundfile
+numpy
+Pillow
+matplotlib
+torchmetrics
+PyYAML

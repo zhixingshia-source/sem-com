@@ -1,0 +1,688 @@
+《项目运行流程说明书》（semantic-comm-backup）
+============================================================
+（基于 `后续.pdf` 主线描述 + 仓库脚本/配置只读核对补全细节）
+
+更新时间：2025-12-14
+项目目录：C:\Users\shizhixing\semantic-comm-backup
+
+------------------------------------------------------------
+0) 我做了什么（按你给的 1→6 步，并说明证据来源）
+------------------------------------------------------------
+1. 从 PDF 提取（以 `后续.pdf` 为主线）
+   - 用 `pdftotext "后续.pdf" -` 抽取到可读文本，得到主线：Stage-1/2/3、KToken-Reps、adapter、CLIP 检索、Stable Diffusion img2img、以及指标/ablation 建议。
+   - `gpt.pdf` 在当前环境 `pdftotext` 只得到分页符（基本无正文），因此无法把它的段落内容纳入主线；对应不确定点见 F。
+
+2. 扫描项目目录结构（只读）
+   - 识别到主线脚本集中在仓库根目录（Stage-1/2/3、检索、生成、评测均为顶层 *.py）。
+   - 识别到 CoDi 子仓库在 `i-Code-V3/`（含 `core/models/...` 与 README）。
+   - 识别到一个独立 demo 子项目在 `semantic_comm/`（含 `environment.yml/requirements.txt/scripts/outputs/src/...`）。
+   - 注意：本 repo 当前并不存在（需要你解包/下载/运行后才会出现）：
+     `snapshots/`、`comprehensive_output/`、`runs/`、`checkpoints/`、`data/`、`data_coco/`、`data_clotho/`。
+     这些都是脚本默认会读/写的关键目录（详见 B/C/D/E）。
+
+3. 把 PDF 流程映射到代码（逐步对应脚本/参数/输出）
+   - Stage-1 对应：`first_train_multiview_align.py` / `stage1_reworked.py` / `stage1_dupsafe.py`
+   - Stage-2 对应：`second_ssss.py`（输出 `KToken-Reps` payload）
+   - Stage-3 对应：`kreps2clip_train.py`（图像检索语义空间）、`kreps2clap_train.py`（音频语义空间）、`train_adapter_semcom.py`（CoDi 条件 tokens）
+   - 检索/生成/评测对应：`build_image_sem_db_(11-22).py`、`kreps2sem_infer_(11-22).py`、`kreps2gen_img2img_(11-26).py`、`kreps2gen_audio_recon.py`、`third.py`、`eval_audio_recon.py` 等。
+   - 冲突点与更可信解释：见 C.6。
+
+4. 给出一条可复现主路径（happy path）
+   - 优先给“日常跑实验”的推理链路：payload → adapter → sem_db 检索 →（可选）生成（因为训练 Stage-1/2/3 计算量大）。
+   - 同时补充当关键工件缺失时，如何最短生成它们（见 D）。
+
+5. 给出最小可运行清单（必须准备什么）
+   - 见 E。
+
+6. 最后给出 ASCII 流程图（从输入到输出）
+   - 见末尾“附录：ASCII 流程图”。
+
+
+============================================================
+A. 一句话概述（项目目标）
+============================================================
+把多模态样本（图像/文本/音频/视频）压缩成可传输的语义载荷 `KToken-Reps`，再用 adapter 映射到目标语义空间（CLIP/CLAP 或 CoDi 条件 token），实现“语义检索 + 生成式重建（SD img2img / AudioLDM / CoDi）”，并输出可视化与评测结果（主线来自 `后续.pdf`；代码实现见 C/D）。
+
+
+============================================================
+B. 目录与关键文件速览
+============================================================
+
+------------------------------------------------------------
+B.1 关键目录（运行时会读/写）
+------------------------------------------------------------
+说明：以下目录在本 repo 当前可能不存在，但脚本会创建/依赖它们。
+
+- `i-Code-V3/`
+  - 作用：CoDi 子仓库（核心模型代码 `core/models/...`）。
+  - 典型权重目录：`i-Code-V3/checkpoints/`（需你自行放置 `.pth`，见 D/E）。
+
+- `data/`（或通过 `--data_root` 指定的目录）
+  - 作用：Stage-1/2 的默认数据根目录。
+  - 结构约定（多脚本一致）：`{data_root}/image/`、`{data_root}/text/`、`{data_root}/audio/`、`{data_root}/vedio/`
+    注意：视频目录拼写是 `vedio`（不是 `video`），这是脚本里的硬编码。
+
+- `snapshots/`
+  - 作用：Stage-1 训练输出（extractor ckpt），例如 `snapshots/step_0300.pth`。
+
+- `comprehensive_output/payloads/`
+  - 作用：Stage-2 输出的 payload 与相关文件。
+  - `second_ssss.py` 默认写这里：`comprehensive_output/payloads/<safe_stem>_payload.json` 等。
+
+- `comprehensive_output/eval/`
+  - 作用：`third.py` 输出评估 JSON 与曲线图。
+
+- `runs/`
+  - 作用：常用于放 adapter ckpt、语义库 sem_db、推理结果等（多个脚本用 `--outdir/--out_path` 指向 runs）。
+
+- `semantic_comm/outputs/`
+  - 作用：`semantic_comm` demo 的输出目录（脚本/README 描述如此）。
+
+
+------------------------------------------------------------
+B.2 关键文件表格（路径/作用/证据）
+------------------------------------------------------------
+（“证据”一栏：要么来自 `后续.pdf` 的主线描述，要么来自对应脚本的 docstring/argparse/实现。）
+
+| 路径/名称 | 作用（输入→输出） | 证据（PDF/代码） |
+|---|---|---|
+| `后续.pdf` | 主线：Stage‑1/2/3 + retrieval + generation 的流程清单与实验建议 | PDF（可抽取文本） |
+| `gpt.pdf` | 可能含更完整文档，但当前无法抽取正文（疑似扫描/图片） | 本环境 `pdftotext` 仅分页符（见 F） |
+| `i-Code-V3/README.md` | CoDi 上游说明与 checkpoint 下载信息 | 代码仓库 README |
+| `first_train_multiview_align.py` | Stage‑1 训练（多模态对齐/抗塌缩）：输出 extractor ckpt 到 `snapshots/` | 代码（头注释/argparse）+ PDF Stage‑1 |
+| `stage1_reworked.py` | Stage‑1 训练另一版本（slot usage/entropy/infonce 等） | 代码（头注释）+ PDF Stage‑1（同类） |
+| `stage1_dupsafe.py` | Stage‑1（抗塌缩稳定版），支持 `--data_root`，并在脚本尾部对齐 text+audio 的样本采集 | 代码（argparse/实现） |
+| `second_ssss.py` | Stage‑2：token 选择→语义等价聚类→选代表→int8+scales→zlib+base64 打包 payload | 代码 docstring + `pack_payload()` 实现 + PDF Stage‑2 |
+| `third.py` | payload 质量评估：读取 payload + extractor ckpt，输出 JSON 与 coverage 曲线图 | 代码 docstring |
+| `kreps2clip_train.py` | 训练 adapter：`KToken-Reps(payload)` → `CLIP image embedding` | 代码 docstring + ckpt 保存字段 |
+| `build_image_sem_db_(11-22).py` | 构建图像语义库：image_root → CLIP embeds → `image_sem_db_*.pt` | 代码 docstring |
+| `kreps2sem_infer_(11-22).py` | 推理检索：payload → adapter → embedding → sem_db top‑k → 拼图输出 | 代码 docstring/实现 |
+| `text2clip_fromtxt_(11-23).py` | baseline：从 `text_root/<stem>.txt` 读 caption → CLIP text → sem_db 检索 | 代码 docstring |
+| `text2clip_retrieval_(11-23).py` | baseline：手输 caption → CLIP text → sem_db 检索（可打印 caption） | 代码实现 |
+| `kreps2gen_img2img_(11-26).py` | 生成：payload → adapter → sem_db 检索 ref → Stable Diffusion img2img 生成并保存对比图 | 代码 docstring + PDF 主线 |
+| `build_clotho_text_audio_sem_db.py` | Clotho：对齐 audio/text stem，用 CoDi encoders 生成 text/audio embedding 并保存 .pt | 代码 docstring |
+| `kreps2clap_train.py` | 训练音频 adapter：payload → CoDi CLAP embedding（语义监督） | 代码 docstring |
+| `kreps2gen_audio_recon.py` | 音频重建：payload → adapter → CLAP embedding → AudioLDM 生成 wav | 代码 docstring |
+| `eval_audio_recon.py` | 原/重建音频的简单指标（MSE/SNR/log-mel/cos） | 代码实现 |
+| `train_adapter_semcom.py` | 训练生成用 adapter：reps → `(1,L,768)` CoDi 视觉条件 tokens | 代码 docstring |
+| `gen_with_adapter.py` | 生成（示例为视频）：payload/reps → adapter → CoDi 条件 token → CoDi sampler.sample → 帧/PNG/GIF | 代码实现 |
+| `semantic_comm/environment.yml` | demo 环境（conda）：python=3.10 + pytorch-cuda=12.1 + pip -r requirements | 代码配置 |
+| `semantic_comm/requirements.txt` | demo 依赖（torch/transformers/diffusers 等精简版） | 代码配置 |
+| `requirements.txt` | 根目录大依赖集合（包含 diffusers/opencv/等） | 代码配置 |
+| `configs/*.yaml` | 一个 YAML 配置集合（paths/codi/setok/comm/experiment），用于 demo 风格的配置驱动 | 配置文件内容（但主线脚本多用 argparse） |
+
+
+------------------------------------------------------------
+B.3 文件名显示异常/需要转义的文件（三段式说明）
+------------------------------------------------------------
+说明：这些文件名包含括号/中文，某些 shell/脚本调用时需要加引号；我按“原文文件名 + 内容摘要 + 用途推断”描述，避免因为显示异常卡住。
+
+1) 文件名原文：`build_image_sem_db_(11-22).py`
+   - 文件内容摘要：扫描 `--image_root` 下 `*.jpg`，按规则 `coco_000001_0001.jpg → stem=coco_000001` 分组；用 `--clip_model` 的 CLIP image encoder 计算 embedding；多帧平均后 L2 normalize；保存 `.pt`：`{"stems": [...], "embeds": Tensor(N,D), "clip_model": ...}`。
+   - 你推断的用途：构建图像检索的语义库（后续 payload/text 检索都依赖它）。
+
+2) 文件名原文：`kreps2sem_infer_(11-22).py`
+   - 文件内容摘要：读取 `--payload_root/<stem>_payload.json` 反量化 reps；按 adapter ckpt 推断 `d_in/d_out/x_mean/x_std`；标准化后 `adapter(x)` 得到语义向量；与 `--sem_db` 中 embeds 余弦相似 top‑k；从 `--image_root` 找 GT 图与检索图拼成 `<stem>_topK.png`。
+   - 你推断的用途：用“压缩语义载荷”做图像检索可视化（主线里的 retrieval 部分）。
+
+3) 文件名原文：`kreps2gen_img2img_(11-26).py`
+   - 文件内容摘要：payload → adapter → embedding → 在 `--sem_db` 上检索 top‑k；选第 `--gen_rank` 个存在的参考图；读取 query/ref 的 caption（`--text_root`）；用 `StableDiffusionImg2ImgPipeline` 做 img2img；输出 ref/gen/并排对比图到 `--outdir`。
+   - 你推断的用途：语义载荷驱动的“检索 + 生成式重建”主实验脚本（PDF 主线重点）。
+
+4) 文件名原文：`text2clip_fromtxt_(11-23).py`
+   - 文件内容摘要：从 `--text_root/<stem>.txt` 读 caption 作为 query；CLIP text encoder 得到 text embedding；在 `--sem_db` 上 top‑k；对每个检索结果再从 txt 读 caption 打印。
+   - 你推断的用途：纯文本 baseline（不经压缩/adapter）的检索上界对照。
+
+5) 文件名原文：`text2clip_retrieval_(11-23).py`
+   - 文件内容摘要：直接用 `--caption` 作为 query；CLIP text embedding；在 `--sem_db` 上检索 top‑k；可选用 `--text_root` 打印检索结果对应 caption。
+   - 你推断的用途：纯文本 baseline 的交互式/手动查询版本。
+
+6) 文件名原文：`后续.pdf`
+   - 文件内容摘要：包含对 Stage‑1/2/3、KToken‑Reps、adapter、CLIP 检索、SD img2img、指标/ablation 的说明；点名关键脚本（如 `second_ssss.py`, `kreps2clip_train.py`, `kreps2sem_infer_(11-22).py`, `kreps2gen_img2img_(11-26).py`, `text2clip_fromtxt_(11-23).py`）。
+   - 你推断的用途：项目流程分析/实验计划的主要参考文档。
+
+7) 文件名原文：`gpt.pdf`
+   - 文件内容摘要：本环境 `pdftotext` 抽取不到正文（只见分页符），`pdfinfo` 显示页数 370，疑似扫描/图片版或特殊编码。
+   - 你推断的用途：可能是更完整的聊天记录/说明书，但需要 OCR 或原始可复制文本才能可靠引用。
+
+
+============================================================
+C. 运行流程（编号步骤 + 每步对应脚本/配置 + 输入输出）
+============================================================
+
+------------------------------------------------------------
+C.1 项目目标/输入/输出（来自 `后续.pdf`）
+------------------------------------------------------------
+项目目标（PDF 主线提炼）：
+- Stage‑1：把原始模态（image/text/audio/video）的 backbone token 序列压缩成 K 个语义 token（你在 PDF 里写成 “KToken‑Reps(32×512)” 之类）。
+- Stage‑2：在 K tokens 上做选择/聚类/代表抽取，并压缩成可传输载荷（int8+scales 的 KToken‑Reps payload）。
+- Stage‑3：训练 adapter，把载荷映射到目标语义空间（例如 CLIP image embedding），用于检索；或映射到生成模型条件空间，用于生成式重建（SD img2img / AudioLDM / CoDi）。
+
+输入（按主线）：
+- 原始数据：图像（可能多帧/多视角），文本 caption，音频 wav，视频 mp4（按数据集可缺省某些模态）。
+- 训练/推理工件：Stage‑1 ckpt（extractor）、Stage‑2 payload、语义库 sem_db、Stage‑3 adapter ckpt、生成模型权重（SD/AudioLDM/CoDi）。
+
+输出（按主线）：
+- Stage‑1：`snapshots/*.pth`（extractor 权重）
+- Stage‑2：`comprehensive_output/payloads/<safe_stem>_{payload.json,reps.pt,members.json,stats.json}`
+- Stage‑3：`runs/.../adapter_*.pth`（或任意你指定的输出目录）
+- 检索：`--outdir/<stem>_topK.png`（拼图）+ 控制台 top‑k 列表
+- 生成：`--outdir/<stem>_gen_*.png`（图像）或 `<stem>_recon.wav`（音频）或 `frames_cfg_*/*.png`（视频帧）
+- 评估：`comprehensive_output/eval/<stem>_eval.json` + `<stem>_coverage_curve.png`
+
+
+------------------------------------------------------------
+C.2 数据布局（代码侧明确约定）
+------------------------------------------------------------
+核心约定（`second_ssss.py` / `first_train_multiview_align.py` / `stage1_reworked.py` 等共用）：
+- 数据根目录：默认 `./data`；或通过 `--data_root <DIR>` 覆盖（至少 `first_train_multiview_align.py`、`stage1_dupsafe.py`、`second_ssss.py` 支持）。
+- 子目录固定为（注意拼写）：`image/`、`text/`、`audio/`、`vedio/`。
+- 图像命名：多处脚本采用 “stem_0001.jpg” 或 COCO 风格 “coco_000001_0001.jpg”；
+  `second_ssss.py` 与 `build_image_sem_db_(11-22).py` 均按 “去掉最后一个 _XXXX” 来得到 stem。
+
+Stage‑2 输出命名（`second_ssss.py` 明确实现）：
+- 对每个样本 stem（可能包含 `/`，如 Clotho 的 `dev/clotho_dev_00001`），输出文件名会先做扁平化：
+  `safe_st = st.replace(\"/\", \"_\")`
+  因此最终文件名是：
+  - `comprehensive_output/payloads/<safe_st>_payload.json`
+  - `comprehensive_output/payloads/<safe_st>_reps.pt`
+  - `comprehensive_output/payloads/<safe_st>_members.json`
+  - `comprehensive_output/payloads/<safe_st>_stats.json`
+
+
+------------------------------------------------------------
+C.3 Stage‑1（训练 extractor：backbone tokens → K tokens）
+------------------------------------------------------------
+对应 PDF：Stage‑1（KToken‑Reps 的来源）。
+
+推荐脚本（支持 `--data_root`，更容易复现）：
+- `first_train_multiview_align.py`
+  - 关键参数（节选，见 argparse）：
+    --data_root：数据根目录（默认 ./data）
+    --codi_root/--codi_ckpt：CoDi 代码与 checkpoints（可覆盖默认 Linux 路径）
+    --steps：训练步数
+    --K / --K_text / --K_image / --K_audio：每模态 K
+    --adapter / --adapter_depth / --adapter_width / --adapter_heads：对齐前的可学习 adapter head（可选）
+    --save_every：保存间隔（输出到 `snapshots/`）
+  - 输入：`<data_root>/{image,text,audio,vedio}` + `i-Code-V3/checkpoints/CoDi_encoders.pth`
+  - 输出：`snapshots/*.pth`（extractor ckpt；供 Stage‑2 使用）
+
+其它 Stage‑1 脚本（同类，不一一推荐）：
+- `stage1_reworked.py`：更激进的反塌缩损失组合（slot usage/entropy/infonce 等），但脚本未看到 `--data_root` 参数，默认只认 `./data`。
+- `stage1_dupsafe.py`：也支持 `--data_root`，且脚本尾部对 “text+audio 成对样本” 有专门采集逻辑（更偏 Clotho）。
+
+
+------------------------------------------------------------
+C.4 Stage‑2（生成 KToken‑Reps payload：选择/聚类/量化/打包）
+------------------------------------------------------------
+对应 PDF：Stage‑2（把 K tokens 压缩成可传输载荷）。
+
+脚本：`second_ssss.py`
+关键参数（argparse）：
+- 数据与样本：
+  --data_root：数据根目录（默认 ./data）
+  --stem：处理单个 stem
+  --all：处理所有 “至少 2 个模态存在” 的 stem（text+image 即满足）
+- 选择/聚类：
+  --sel：selection threshold（默认 0.8）
+  --clu：cluster threshold（默认 0.8）
+  --floor：每模态最少保留 token 数
+  --topk_per_modality：阈值后再取 Top‑K
+  --rep_per_cluster：每簇选多少个代表（>=1）
+- 预算裁剪：
+  --budget：最多传多少个代表 token（0=不限）
+  --budget_strategy：by_cluster_size / uniform / none
+- ckpt/输出：
+  --ckpt：Stage‑1 输出的 extractor ckpt（默认 `snapshots/step_0300.pth`）
+  --out：输出目录（默认 `comprehensive_output/payloads`）
+- 可选 adapter（对 reps 再变换后再选/聚类）：
+  --adapter：identity/mlp/xattn
+  --adapter_depth/--adapter_width/--adapter_heads
+  --adapter_ckpt：可选加载 adapter 的 state_dict
+- 编码取帧/音频截取：
+  --img_take：每个 stem 取多少张图像帧
+  --aud_seconds：音频截取长度
+
+输入：
+- Stage‑1 ckpt：`--ckpt snapshots/step_XXXX.pth`
+- CoDi encoders：`i-Code-V3/checkpoints/CoDi_encoders.pth`（脚本内部加载）
+- 数据：`--data_root` 下的 `image/text/audio/vedio`（至少 2 个模态存在才会进 `--all`）
+
+输出（对每个 stem，注意 safe_st 替换 `/` 为 `_`）：
+- `comprehensive_output/payloads/<safe_st>_payload.json`
+  - 结构要点：
+    kind=KToken-Reps
+    n_tokens=N, dim=D（通常 D=512）
+    dtype=int8, encoding=zlib+base64
+    scales: List[float]（每 token 一个 scale）
+    data: base64(zlib(int8[N*D]))
+    metadata: 包含 rep_members / cluster_sizes 等
+- `comprehensive_output/payloads/<safe_st>_reps.pt`（代表 token 的 float32 Tensor）
+- `comprehensive_output/payloads/<safe_st>_members.json` / `<safe_st>_stats.json`
+
+
+------------------------------------------------------------
+C.5 Stage‑3（训练/使用 adapter：payload → 语义空间/生成条件）
+------------------------------------------------------------
+对应 PDF：Stage‑3（adapter），以及后续 retrieval/generation。
+
+1) 图像检索空间（CLIP image embedding）
+- 训练：`kreps2clip_train.py`
+  - 输入：
+    --payload_root：包含 `*_payload.json` 的目录（注意：此脚本用 `glob(\"*_payload.json\")`，只扫一层，不递归）
+    --image_root：图像目录（按 stem 配对；默认认为 `coco_000001_0001.jpg` 属于 stem `coco_000001`）
+  - 输出：`--outdir/adapter_clip_best.pth`（以及按步保存的 ckpt）
+    - ckpt 字段（脚本保存）：
+      state_dict / d_in / d_out / x_mean / x_std / max_tokens / clip_model
+  - 关键参数：
+    --clip_model（必须与 build_image_sem_db 用同一个，否则维度/空间不一致）
+    --max_tokens（adapter 输入固定维度 = max_tokens * D_token）
+    --steps / --batch_size / --hidden / --layers / --lr / --weight_decay
+    --lambda_mse / --lambda_cos（损失权重）
+
+- 构建语义库：`build_image_sem_db_(11-22).py`
+  - 输入：--image_root + --clip_model
+  - 输出：--out_path（`.pt`，含 stems+embeds）
+
+- 推理检索：`kreps2sem_infer_(11-22).py`
+  - 输入：--payload_root、--adapter_ckpt、--sem_db、--image_root
+  - 输出：--outdir 下 `<stem>_topK.png`
+  - 关键一致性检查：脚本会检查 `adapter d_out` == `sem_db embeds dim`，不一致会直接报错。
+
+2) 生成（图像：SD img2img）
+- `kreps2gen_img2img_(11-26).py`
+  - 输入：与 `kreps2sem_infer` 类似，再加 `--text_root`（读 caption 拼 prompt）与 `--sd_model` 等。
+  - 输出：`--outdir` 下保存参考图、生成图、并排对比图（文件名见脚本头 docstring）。
+
+3) 音频语义空间（CoDi CLAP → AudioLDM）
+- 训练：`kreps2clap_train.py`（payload → CLAP embedding）
+  - 注意：此脚本也用 `glob(\"*_payload.json\")`（只扫一层）。
+  - Clotho 的原始 stem 可能含 `/`，但 Stage‑2 输出已用 `safe_st=replace(\"/\",\"_\")` 扁平化，脚本内部按规则还原去找 wav。
+
+- 推理重建：`kreps2gen_audio_recon.py`（payload → adapter → CLAP embedding → AudioLDMPipeline 生成 wav）
+  - 输出：`--outdir/<stem>_recon.wav`（脚本支持 `--all` 批量，对 payload_root 用 `rglob` 递归扫）
+
+- 评测：`eval_audio_recon.py`（对齐原 wav 与 recon wav，算 MSE/SNR/log-mel MSE/cos）
+
+4) CoDi 条件 tokens 生成（示例：视频）
+- `train_adapter_semcom.py`：训练 reps → `(1,L,768)` 的 adapter ckpt（保存 ctx_len/ctx_dim）
+- `gen_with_adapter.py`：payload/reps → adapter → cond tokens → CoDi sampler.sample → 输出帧/PNG/GIF
+
+
+------------------------------------------------------------
+C.6 PDF 与代码不一致/冲突点（并给出更可信解释）
+------------------------------------------------------------
+1) Stage 编号口径不完全一致
+- PDF 里写的 “Stage‑1/2/3” 与代码脚本名基本能对上，但部分脚本的 docstring 会把“训练 adapter”称作某个阶段（例如你可能把它叫 Stage‑2/3）。
+- 更可信解释：以 `second_ssss.py` docstring 的定义为准：它明确写“Stage‑2：Token Selection → ... → payload”，而 adapter 训练属于其后续（这里统一称 Stage‑3）。
+
+2) PDF 中出现的“占位脚本名”（代码里不存在）
+- `后续.pdf` 中可见类似 `build_audio_sem_db_(MM-DD).py`、`kreps2audio_train_(MM-DD).py` 等名字（MM-DD 是占位日期）。
+- 更可信解释：这是你规划中的脚本命名模板；当前仓库里对应功能可能以其它文件名实现，例如：
+  - 音频 text+audio sem_db：`build_clotho_text_audio_sem_db.py`
+  - 音频 adapter：`kreps2clap_train.py`、`kreps2audioldm_train.py`
+
+3) `semantic_comm/` demo 与主线脚本体系是两套风格
+- `semantic_comm/scripts/run_pipeline.sh` 试图用 `--exp configs/experiment.yaml` 驱动；
+  但 `semantic_comm/src/pipelines/semantic_comm_pipeline.py` 目前主要是硬编码流程与开关（不解析 exp），且默认开关可能导致运行到未初始化的分支。
+- 更可信解释：`semantic_comm/` 是单独 demo/草稿，与 PDF 主线（Stage‑1/2/3 的顶层脚本）并行存在；写论文/跑主实验建议以顶层脚本链路为准。
+
+4) 数据压缩包当前看起来不完整
+- 目录里有 `data_coco.tar.gz`/`data_clotho.tar.gz`，但 `tar -tf` 会报 “Truncated input file”。
+- 更可信解释：压缩包是截断/未完整下载的，需要重新获取；否则解包/训练/推理都会缺文件。
+
+
+============================================================
+D. 关键命令示例（按 OS/场景：预处理/训练/推理/评测）
+============================================================
+说明：
+- `后续.pdf` 主体更像“流程+脚本清单”，不提供完整可复制命令；因此这里优先引用脚本 docstring/argparse 推导出的命令。
+- Windows 下遇到括号文件名请务必加引号：例如 `python \"kreps2sem_infer_(11-22).py\" ...`
+
+------------------------------------------------------------
+D.1 预处理：准备环境（推荐 conda）
+------------------------------------------------------------
+（1）创建环境（示例）
+  conda env create -f semantic_comm/environment.yml
+  conda activate semantic_comm
+
+（2）补充安装（视你用哪些脚本）
+  pip install -r requirements.txt
+  pip install torchaudio scipy tqdm
+
+------------------------------------------------------------
+D.2 预处理：准备 CoDi 权重（必须）
+------------------------------------------------------------
+你需要把 CoDi checkpoint 放到（或等价路径）：
+  `i-Code-V3/checkpoints/`
+至少需要：
+  - `CoDi_encoders.pth`
+如果要用 CoDi 生成（视频/音频/图像）还需要（按脚本）：
+  - `CoDi_video_diffuser_8frames.pth`
+  - `CoDi_audio_diffuser_m.pth`
+  - `CoDi_text_diffuser.pth`
+
+（权重下载方式见 `i-Code-V3/README.md`；离线环境需提前缓存。）
+
+------------------------------------------------------------
+D.3 预处理：准备数据目录（必须）
+------------------------------------------------------------
+把数据解包/整理到下面这种结构（示例以 COCO 风格为主）：
+  data_coco/
+    image/  coco_000001_0001.jpg ...
+    text/   coco_000001.txt ...
+    audio/  （可选）
+    vedio/  （可选，注意拼写 vedio）
+
+如果你希望用脚本默认路径（`./data`），可以把 `data_coco` 改名/复制为 `data`；
+否则多数脚本可用 `--data_root data_coco` 指定（Stage‑1/2）。
+
+------------------------------------------------------------
+D.4 训练：Stage‑1（生成 extractor ckpt → snapshots/）
+------------------------------------------------------------
+（示例：多模态对齐版，支持 --data_root）
+  python first_train_multiview_align.py ^
+    --data_root data_coco ^
+    --codi_root i-Code-V3 ^
+    --codi_ckpt i-Code-V3/checkpoints ^
+    --steps 900 ^
+    --save_every 300 ^
+    --K 16
+
+输出（示例）：
+  snapshots/step_0300.pth
+
+------------------------------------------------------------
+D.5 推理/预处理：Stage‑2（生成 KToken-Reps payload → comprehensive_output/payloads/）
+------------------------------------------------------------
+单样本：
+  python second_ssss.py ^
+    --data_root data_coco ^
+    --stem coco_000001 ^
+    --ckpt snapshots/step_0300.pth ^
+    --sel 0.60 ^
+    --clu 0.70 ^
+    --rep_per_cluster 3 ^
+    --out comprehensive_output/payloads
+
+批量（处理所有 >=2 模态的 stem；text+image 即满足）：
+  python second_ssss.py ^
+    --data_root data_coco ^
+    --all ^
+    --ckpt snapshots/step_0300.pth ^
+    --sel 0.60 ^
+    --clu 0.70 ^
+    --out comprehensive_output/payloads
+
+输出（对每个 stem=st，会写 safe_st=st.replace(\"/\",\"_\") 的文件名）：
+  comprehensive_output/payloads/<safe_st>_payload.json
+  comprehensive_output/payloads/<safe_st>_reps.pt
+  comprehensive_output/payloads/<safe_st>_members.json
+  comprehensive_output/payloads/<safe_st>_stats.json
+
+------------------------------------------------------------
+D.6 预处理：构建图像语义库 sem_db（image_root → image_sem_db_*.pt）
+------------------------------------------------------------
+  python \"build_image_sem_db_(11-22).py\" ^
+    --image_root data_coco/image ^
+    --out_path runs/sem_db/image_sem_db_11_22.pt ^
+    --clip_model openai/clip-vit-large-patch14 ^
+    --batch_size 64
+
+输出：
+  runs/sem_db/image_sem_db_11_22.pt
+
+------------------------------------------------------------
+D.7 训练：Stage‑3（训练 adapter：payload → CLIP image embedding）
+------------------------------------------------------------
+  python kreps2clip_train.py ^
+    --payload_root comprehensive_output/payloads ^
+    --image_root data_coco/image ^
+    --outdir runs/kreps2clip_exp1 ^
+    --clip_model openai/clip-vit-large-patch14 ^
+    --max_tokens 32 ^
+    --steps 50000 ^
+    --batch_size 8
+
+输出（示例）：
+  runs/kreps2clip_exp1/adapter_clip_best.pth
+
+------------------------------------------------------------
+D.8 推理：payload → top‑k 检索可视化（拼图）
+------------------------------------------------------------
+  python \"kreps2sem_infer_(11-22).py\" ^
+    --payload_root comprehensive_output/payloads ^
+    --stem coco_000001 ^
+    --adapter_ckpt runs/kreps2clip_exp1/adapter_clip_best.pth ^
+    --sem_db runs/sem_db/image_sem_db_11_22.pt ^
+    --image_root data_coco/image ^
+    --outdir runs/kreps2sem_infer_11_22 ^
+    --topk 5
+
+输出：
+  runs/kreps2sem_infer_11_22/coco_000001_top5.png
+
+------------------------------------------------------------
+D.9 baseline：纯文本 caption → image 检索
+------------------------------------------------------------
+从 txt 读取 query：
+  python \"text2clip_fromtxt_(11-23).py\" ^
+    --stem coco_000001 ^
+    --text_root data_coco/text ^
+    --sem_db runs/sem_db/image_sem_db_11_22.pt ^
+    --clip_model openai/clip-vit-large-patch14 ^
+    --topk 5
+
+手动输入 query：
+  python \"text2clip_retrieval_(11-23).py\" ^
+    --caption \"a city under stars\" ^
+    --sem_db runs/sem_db/image_sem_db_11_22.pt ^
+    --clip_model openai/clip-vit-large-patch14 ^
+    --topk 5 ^
+    --text_root data_coco/text
+
+------------------------------------------------------------
+D.10 生成：payload → 检索 ref → Stable Diffusion img2img
+------------------------------------------------------------
+  python \"kreps2gen_img2img_(11-26).py\" ^
+    --payload_root comprehensive_output/payloads ^
+    --stem coco_000001 ^
+    --adapter_ckpt runs/kreps2clip_exp1/adapter_clip_best.pth ^
+    --sem_db runs/sem_db/image_sem_db_11_22.pt ^
+    --image_root data_coco/image ^
+    --text_root data_coco/text ^
+    --outdir runs/kreps2gen_img2img_11_26 ^
+    --topk 5 ^
+    --gen_rank 1 ^
+    --sd_model runwayml/stable-diffusion-v1-5 ^
+    --sd_strength 0.6 ^
+    --sd_guidance_scale 7.5 ^
+    --sd_steps 50 ^
+    --sd_seed 42
+
+输出（示例，具体文件名以脚本为准）：
+  runs/kreps2gen_img2img_11_26/coco_000001_ref_<ref_stem>.png
+  runs/kreps2gen_img2img_11_26/coco_000001_gen_from_<ref_stem>.png
+  runs/kreps2gen_img2img_11_26/coco_000001_ref_gen_side_by_side.png
+
+------------------------------------------------------------
+D.11 评测：payload 质量评估（coverage 曲线等）
+------------------------------------------------------------
+  python third.py ^
+    --stem coco_000001 ^
+    --payload comprehensive_output/payloads/coco_000001_payload.json ^
+    --ckpt snapshots/step_0300.pth ^
+    --tau 0.60 0.70 0.80 0.90
+
+输出：
+  comprehensive_output/eval/coco_000001_eval.json
+  comprehensive_output/eval/coco_000001_coverage_curve.png
+
+
+============================================================
+E. 最小可运行清单（必须准备哪些文件/目录/环境变量/依赖）
+============================================================
+
+------------------------------------------------------------
+E.1 必须准备的目录与文件（按 happy path 的最小集合）
+------------------------------------------------------------
+（1）CoDi 代码 + 权重
+- `i-Code-V3/core/models/model_module_infer.py`（代码已在 repo 内）
+- `i-Code-V3/checkpoints/CoDi_encoders.pth`（必须；你需要自行下载/放置）
+（如果要用 `gen_with_adapter.py` 的 CoDi 生成：还要对应 diffuser 权重）
+
+（2）数据（至少图像+文本用于 COCO 检索/生成主线）
+- `<DATA_ROOT>/image/*.jpg`
+- `<DATA_ROOT>/text/<stem>.txt`
+  其中 `<stem>` 与图像 stem 对齐：例如 `coco_000001_0001.jpg` 对应 `text/coco_000001.txt`
+
+（3）Stage‑2 输出（payload）
+- `comprehensive_output/payloads/<safe_st>_payload.json`
+  （safe_st = stem.replace(\"/\",\"_\")；COCO stem 通常无 `/`）
+
+（4）Stage‑3 输出（adapter）
+- `runs/.../adapter_clip_best.pth`（由 `kreps2clip_train.py` 训练得到）
+
+（5）语义库 sem_db
+- `runs/sem_db/image_sem_db_11_22.pt`（由 `build_image_sem_db_(11-22).py` 生成）
+  注意：`--clip_model` 必须与 `kreps2clip_train.py --clip_model` 相同，否则空间/维度不一致。
+
+（6）（可选）Stage‑1 输出（extractor）
+- `snapshots/step_XXXX.pth`（只有当你要从零跑 Stage‑2 时才需要；若你已有 payload 可跳过 Stage‑1/2）
+
+------------------------------------------------------------
+E.2 建议设置的环境变量（可选但常用）
+------------------------------------------------------------
+- `CODI_ROOT`：指向 `i-Code-V3` 根目录（部分脚本默认 Linux 路径，不设会找不到）
+  Windows PowerShell 示例：
+    $env:CODI_ROOT = (Resolve-Path .\\i-Code-V3).Path
+
+- `HF_HOME` / `TRANSFORMERS_CACHE` / `HF_HUB_CACHE`：
+  如果你需要离线/统一缓存目录，建议显式设置到一个有足够空间的位置。
+
+- `HF_CLIP`（少数 Stage‑1 脚本的 HuggingFace CLIP 兜底模型名）：
+  例如：`openai/clip-vit-base-patch32`
+
+------------------------------------------------------------
+E.3 依赖（按脚本实际 import 归纳）
+------------------------------------------------------------
+核心依赖（几乎必需）：
+- torch, torchvision
+- transformers（CLIP/Tokenizer；并且 CoDi 内部兼容性靠脚本里的 patch）
+- numpy, pillow
+
+检索/可视化常用：
+- tqdm（构建 sem_db）
+- matplotlib（third.py 画 coverage 曲线）
+
+生成相关：
+- diffusers（SD img2img, AudioLDM）
+- scipy（写 wav）
+
+音频/视频相关：
+- torchaudio（Clotho 音频编码/评测）
+- opencv-python 或 opencv-python-headless（video/mp4 读取）
+
+说明：
+- 根目录 `requirements.txt` 覆盖面很大（含 diffusers/opencv 等）；`semantic_comm/requirements.txt` 较精简。
+
+
+============================================================
+F. 常见问题与排错（具体到文件/参数/路径）
+============================================================
+
+1) `snapshots/` / `comprehensive_output/` / `runs/` 等目录不存在
+- 现象：脚本报找不到 ckpt/payload/sem_db，或输出路径不存在。
+- 处理：
+  - `second_ssss.py` 会对 `--out` 自动 `mkdir(parents=True)`，但前置的 `--ckpt` 必须存在。
+  - `kreps2clip_train.py`/`build_image_sem_db_(11-22).py` 会对 `--outdir/--out_path` 创建父目录，但输入目录必须存在。
+
+2) 数据目录拼写问题：`vedio` 不是 `video`
+- 现象：明明有视频文件但脚本认为没有（或 `--all` 找不到样本）。
+- 处理：把目录命名为 `vedio/`（或改脚本，但你当前要求不修改文件）。
+
+3) stem 命名不一致导致配对失败（最常见）
+- 关键规则（代码）：
+  - `second_ssss.py`：图像 `*_*.jpg` → stem = “去掉最后一个 _XXXX”
+  - `build_image_sem_db_(11-22).py`：同上（COCO 风格匹配）
+  - `kreps2clip_train.py`：同上（按 stem 配对 payload 与 image）
+  - `text2clip_fromtxt_(11-23).py`：caption 文件必须是 `text_root/<stem>.txt`
+- 处理：统一你的文件命名与 text 文件名，确保 stem 完全一致。
+
+4) payload 文件名（含 `/`）的问题
+- Stage‑2 已做扁平化：`safe_st = st.replace(\"/\",\"_\")`（见 `second_ssss.py`）
+- 影响：如果你的原始 stem 是 `dev/clotho_dev_00001`，payload 文件名会是 `dev_clotho_dev_00001_payload.json`。
+  这与 `kreps2clap_train.py`/`kreps2audioldm_train.py` 的注释假设一致。
+
+5) transformers/CoDi tokenizer 兼容性报错（`get_vocab` / `encoder`）
+- 现象：AttributeError: tokenizer has no attribute encoder 等。
+- 处理：
+  - 多个脚本自带 `_patch_codi_clip_tokenizer()`：确保你使用的是这些脚本入口，而不是直接从其它地方 import 未 patch 的 CoDi tokenizer。
+  - 若仍失败：尝试匹配 `transformers>=4.40.0`（见 `semantic_comm/requirements.txt`），并确保 CoDi 代码版本与之相容。
+
+6) sem_db 维度与 adapter 输出不一致
+- 现象：`kreps2sem_infer_(11-22).py` 报 `dimension mismatch: adapter d_out=... vs sem_db D=...`
+- 处理：保证：
+  - `kreps2clip_train.py --clip_model X`
+  - `build_image_sem_db_(11-22).py --clip_model X`
+  两者的 CLIP 模型名一致（同一 embedding 空间、同一维度）。
+
+7) HuggingFace/模型下载导致“卡住/失败”
+- 现象：首次运行 CLIP/SD/AudioLDM 时长时间等待或下载失败。
+- 处理：提前缓存或改用本地模型路径；设置 `HF_HOME/TRANSFORMERS_CACHE`；离线环境避免直接跑生成脚本。
+
+8) `data_coco.tar.gz` / `data_clotho.tar.gz` 解包报错
+- 现象：`tar` 报 `Truncated input file`
+- 处理：压缩包可能不完整，重新下载/重新打包；否则数据缺失会导致训练/推理失败。
+
+
+============================================================
+附录：ASCII 流程图（从输入到输出）
+============================================================
+
+（主线：图像检索 + 生成）
+
+  [原始数据目录 data_root]
+      |
+      |-- image/  <stem>_<frame>.jpg  (例：coco_000001_0001.jpg)
+      |-- text/   <stem>.txt          (例：coco_000001.txt)
+      |-- audio/  <stem>.wav          (可选)
+      |-- vedio/  <stem>.mp4          (可选，注意拼写)
+      v
+  [CoDi encoders @ i-Code-V3/checkpoints/CoDi_encoders.pth]
+      v
+  (Stage-1 训练) first_train_multiview_align.py / stage1_*.py
+      |  输出：snapshots/step_XXXX.pth   (extractor ckpt)
+      v
+  (Stage-2 打包) second_ssss.py
+      |  选择(--sel) -> 聚类(--clu) -> 选代表(--rep_per_cluster) -> 预算(--budget)
+      |  量化：int8 + scales -> zlib+base64
+      |  输出：
+      |    comprehensive_output/payloads/<safe_st>_payload.json
+      |    comprehensive_output/payloads/<safe_st>_reps.pt / *_stats.json / *_members.json
+      v
+  (Stage-3 训练 adapter) kreps2clip_train.py
+      |  输入：payloads/*_payload.json + image_root
+      |  输出：runs/.../adapter_clip_best.pth
+      v
+  (建语义库) build_image_sem_db_(11-22).py
+      |  输入：image_root + clip_model
+      |  输出：runs/sem_db/image_sem_db_11_22.pt
+      v
+  (推理检索) kreps2sem_infer_(11-22).py
+      |  payload -> adapter -> CLIP embedding -> sem_db top-k
+      |  输出：runs/.../<stem>_topK.png
+      v
+  (生成重建，可选) kreps2gen_img2img_(11-26).py
+      |  top-k ref stem -> ref image + caption
+      |  Stable Diffusion img2img
+      |  输出：runs/.../<stem>_gen_from_<ref>.png 及对比图
+
+（音频分支：payload → CLAP → AudioLDM）
+
+  comprehensive_output/payloads/<safe_st>_payload.json
+      -> (adapter) kreps2clap_train.py 产出的 adapter_clap_best.pth
+      -> (推理生成) kreps2gen_audio_recon.py
+      -> 输出：runs/.../<stem>_recon.wav
+      -> (评测) eval_audio_recon.py
+

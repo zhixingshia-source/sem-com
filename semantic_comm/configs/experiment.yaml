@@ -1,0 +1,7 @@
+include:
+  - paths.yaml
+  - setok.yaml
+  - codi.yaml
+  - comm.yaml
+prompt: "夜晚繁星下的城市"
+seed: 42

@@ -1,0 +1,4 @@
+project_root: .
+checkpoints_dir: checkpoints
+output_root: outputs
+device: cuda

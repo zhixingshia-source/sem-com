@@ -1,0 +1,10 @@
+hidden_dim: 4096
+token_feat_dim: 4096
+min_cluster_num: 64
+threshold: 0.53
+nheads: 2
+inner_cluster_layers: 2
+intra_cluster_layers: 2
+weights:
+  tokenizer: setok_tokenizer.pth
+  detokenizer: setok_detokenizer.pth

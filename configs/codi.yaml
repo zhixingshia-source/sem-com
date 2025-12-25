@@ -1,0 +1,19 @@
+fp16: true
+weights:
+  - CoDi_encoders.pth
+  - CoDi_text_diffuser.pth
+  - CoDi_video_diffuser_8frames.pth
+  - CoDi_audio_diffuser_m.pth
+image:
+  size: 512
+  ddim_steps: 50
+  scale: 7.5
+audio:
+  sr: 16000
+  ddim_steps: 50
+  scale: 7.5
+video:
+  size: 256
+  num_frames: 8
+  ddim_steps: 50
+  scale: 7.5

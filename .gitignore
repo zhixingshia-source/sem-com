@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tar.gz
+*.zip
+*.7z
+*.pdf
+*.mp4
+*.flac
+*.wav
+*.pt
+*.pth
+*.ckpt
+.ipynb_checkpoints/
+.pytest_cache/
